@@ -57,9 +57,7 @@ class ConversationLogger:
         conversation_file = self.get_conversation_log_file(call_sid)
         with open(conversation_file, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] CALL_START: {to_number} -> {from_number}\n")
-            f.write(f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] SYSTEM_PROMPT: {agent_config.get('systemPrompt', 'Default prompt')}\n")
-            f.write("-" * 80 + "\n")
-        
+            
         logger.info(f"Call started: {call_sid} ({to_number} -> {from_number})")
     
     def log_call_end(self, call_sid: str, reason: str = "unknown") -> None:
@@ -95,11 +93,9 @@ class ConversationLogger:
         confidence_str = f" (confidence: {confidence})" if confidence else ""
         log_entry = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] Agent: {message}{confidence_str}\n"
         
+        # Persist to conversation log file only (no app server logging)
         with open(conversation_file, "a", encoding="utf-8") as f:
             f.write(log_entry)
-        
-        print(log_entry.strip(), flush=True)
-        logger.info(f"[{call_sid}] Agent: {message}")
 
     
     def log_customer_message(self, call_sid: str, message: str, timestamp: Optional[datetime] = None) -> None:
@@ -110,11 +106,9 @@ class ConversationLogger:
         conversation_file = self.get_conversation_log_file(call_sid)
         log_entry = f"[{timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] Customer: {message}\n"
         
+        # Persist to conversation log file only (no app server logging)
         with open(conversation_file, "a", encoding="utf-8") as f:
             f.write(log_entry)
-        
-        print(log_entry.strip(), flush=True)
-        logger.info(f"[{call_sid}] Customer: {message}")
 
     
     def log_waiting_for_agent(self, call_sid: str) -> None:

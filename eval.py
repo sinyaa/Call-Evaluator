@@ -12,6 +12,135 @@ import re
 from typing import Optional, Dict, Any
 from datetime import datetime
 
+import os, glob, time, re
+
+from datetime import datetime
+import re, statistics, os
+
+from datetime import datetime
+import re, statistics, os
+
+from datetime import datetime
+import re, statistics, os
+
+from datetime import datetime
+import re, statistics, os
+
+def analyze_conversation_log(
+    log_file: str,
+    cust_wpm: int = 170,
+    agent_wpm: int = 170,
+    vad_ms: int = 700
+):
+    if not os.path.exists(log_file):
+        raise FileNotFoundError(f"File not found: {log_file}")
+
+    line = re.compile(
+        r'\[(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d{3})?)\]\s*(?P<speaker>Agent|Customer|CALL_START):\s*(?P<msg>.*)'
+    )
+    def to_dt(ts: str):
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S.%f" if "." in ts else "%Y-%m-%d %H:%M:%S")
+
+    def words_ms(text: str, wpm: int) -> float:
+        return (len(text.split()) / max(1, wpm)) * 60_000.0
+
+    entries, call_start = [], None
+    with open(log_file, "r", encoding="utf-8") as f:
+        for raw in f:
+            m = line.match(raw.strip())
+            if not m:
+                continue
+            t = to_dt(m.group("ts"))
+            spk = m.group("speaker")
+            msg = m.group("msg").strip()
+            entries.append({"t": t, "speaker": spk, "msg": msg})
+            if spk == "CALL_START":
+                call_start = t
+
+    # FRL
+    first_agent = next((e["t"] for e in entries if e["speaker"] == "Agent"), None)
+    frl_ms = round((first_agent - call_start).total_seconds() * 1000, 1) if (call_start and first_agent) else None
+
+    # Pair each Customer with the next Agent
+    pairs = []
+    for i, e in enumerate(entries):
+        if e["speaker"] != "Customer":
+            continue
+        for j in range(i + 1, len(entries)):
+            if entries[j]["speaker"] == "Agent":
+                start_to_start_ms = (entries[j]["t"] - e["t"]).total_seconds() * 1000
+                if start_to_start_ms > 0:
+                    pairs.append({
+                        "cust_msg": e["msg"],
+                        "agent_msg": entries[j]["msg"],
+                        "start_to_start_ms": start_to_start_ms
+                    })
+                break
+
+    # Metrics
+    start_to_start_vals = [p["start_to_start_ms"] for p in pairs]
+    resp_stats = {
+        "avg_ms": round(statistics.mean(start_to_start_vals), 1),
+        "min_ms": round(min(start_to_start_vals), 1),
+        "max_ms": round(max(start_to_start_vals), 1),
+        "count": len(start_to_start_vals),
+    } if start_to_start_vals else {}
+
+    gap_vals, turn_completion_vals = [], []
+    for p in pairs:
+        cust_ms = words_ms(p["cust_msg"], cust_wpm)
+        gap_ms = max(0.0, p["start_to_start_ms"] - cust_ms - vad_ms)
+        gap_vals.append(gap_ms)
+        agent_tts_ms = words_ms(p["agent_msg"], agent_wpm)
+        turn_completion_vals.append(gap_ms + agent_tts_ms)
+
+    est_gap_stats = {
+        "avg_ms": round(statistics.mean(gap_vals), 1),
+        "min_ms": round(min(gap_vals), 1),
+        "max_ms": round(max(gap_vals), 1),
+        "count": len(gap_vals),
+    } if gap_vals else {}
+
+    est_turn_stats = {
+        "avg_ms": round(statistics.mean(turn_completion_vals), 1),
+        "min_ms": round(min(turn_completion_vals), 1),
+        "max_ms": round(max(turn_completion_vals), 1),
+        "count": len(turn_completion_vals),
+    } if turn_completion_vals else {}
+
+    # Colors
+    GREEN = "\033[92m"; BOLD = "\033[1m"; RESET = "\033[0m"; WHITE = "\033[97m"
+
+    print("--------------------------------------------------------------------------------")
+    if frl_ms is not None:
+        print(f"{GREEN}{BOLD}FRL:{RESET} {WHITE}{frl_ms} ms{RESET}")
+    else:
+        print(f"{GREEN}{BOLD}FRL:{RESET} not available")
+
+    if resp_stats:
+        print(f"{GREEN}{BOLD}Response Latency:{RESET} "
+              f"{WHITE}{resp_stats['avg_ms']} ms (avg), "
+              f"{resp_stats['min_ms']}–{resp_stats['max_ms']} ms, n={resp_stats['count']}{RESET}")
+
+    if est_gap_stats:
+        print(f"{GREEN}{BOLD}Estimated Latency:{RESET} "
+              f"{WHITE}{est_gap_stats['avg_ms']} ms (avg), "
+              f"{est_gap_stats['min_ms']}–{est_gap_stats['max_ms']} ms{RESET}")
+
+    if est_turn_stats:
+        print(f"{GREEN}{BOLD}Turn Completion:{RESET} "
+              f"{WHITE}{est_turn_stats['avg_ms']} ms (avg), "
+              f"{est_turn_stats['min_ms']}–{est_turn_stats['max_ms']} ms{RESET}")
+
+    return {
+        "FRL_ms": frl_ms,
+        "ResponseLatency": resp_stats,
+        "EstimatedGapLatency": est_gap_stats,
+        "EstimatedTurnCompletion": est_turn_stats,
+    }
+
+
+
 def load_config() -> Dict[str, Any]:
     """Load configuration from hardcoded test.config.json."""
     config_file = "test.config.json"
@@ -108,6 +237,72 @@ def check_call_status(base_url: str, call_sid: str) -> Optional[Dict[str, Any]]:
 
 def parse_conversation_log(log_file: str) -> list:
     """Parse conversation log file and extract meaningful conversation entries."""
+    import re
+    conversation_entries = []
+
+    if not os.path.exists(log_file):
+        return conversation_entries
+
+    # Matches:
+    # [2025-10-04 13:18:39.934] Agent: Hello. (confidence: 0.65300703)
+    # [2025-10-04 13:18:40] Customer: Hi ...
+    line_re = re.compile(
+        r'\['
+        r'(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d{3})?)'  # timestamp, ms optional
+        r'\]\s+'
+        r'(?P<speaker>Agent|Customer):\s+'
+        r'(?P<msg>.*?)'                                               # message (non-greedy)
+        r'(?:\s*\(confidence:\s*(?P<conf>[0-9.]+)\))?'                # optional confidence
+        r'\s*$'
+    )
+
+    EXCLUDE_PREFIXES = (
+        'CALL_START:', 'SYSTEM_PROMPT:', 'CALL_END:', 'ERROR:',
+        'finished speaking', 'Audio level:', 'Audio received',
+        'Speech detected', 'Generating response', 'Speaking',
+        'Response completed', 'Error:'
+    )
+
+    try:
+        with open(log_file, 'r', encoding='utf-8') as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                m = line_re.match(line)
+                if not m:
+                    # Not an Agent/Customer line; skip (meta like CALL_START, separators, etc.)
+                    continue
+
+                timestamp = m.group('ts')
+                speaker = m.group('speaker')
+                message = m.group('msg').strip()
+                conf = m.group('conf')
+
+                # Filter obvious technical noise (usually won’t hit since meta lines won’t match)
+                if any(message.startswith(p) for p in EXCLUDE_PREFIXES):
+                    continue
+                if message.startswith('['):  # stray bracketed system lines
+                    continue
+
+                entry = {
+                    'timestamp': timestamp,
+                    'speaker': speaker,
+                    'message': message
+                }
+                if conf is not None:
+                    # Keep confidence as float if you want to print it later
+                    entry['confidence'] = float(conf)
+
+                conversation_entries.append(entry)
+
+
+    except Exception as e:
+        print(f"Error parsing conversation log: {e}")
+
+    return conversation_entries
+    """Parse conversation log file and extract meaningful conversation entries."""
     conversation_entries = []
     
     if not os.path.exists(log_file):
@@ -146,10 +341,7 @@ def parse_conversation_log(log_file: str) -> list:
                             'timestamp': timestamp,
                             'speaker': speaker,
                             'message': message
-                        })
-
-                        print(f"Conversation log: {message}")
-                
+                        })                
     
     except Exception as e:
         print(f"Error parsing conversation log: {e}")
@@ -352,7 +544,10 @@ def main():
             print("No conversation log file found.")
     else:
         print("\nNo conversation detected during monitoring period.")
-    
+
+
+    print("\n")
+    analyze_conversation_log(log_file)    
     print("\nCall evaluation completed!")
 
 if __name__ == "__main__":

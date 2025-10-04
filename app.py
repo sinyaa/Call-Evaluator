@@ -14,9 +14,9 @@ from src.services.twilio_client import make_outbound_call
 import sys
 import os
 
-# Configure logging
+# Configure logging (suppress debug output in server logs)
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -24,6 +24,16 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Reduce verbosity of noisy third-party loggers
+for noisy_logger_name in [
+    'twilio',
+    'twilio.http_client',
+    'urllib3',
+    'multipart',
+    'multipart.multipart'
+]:
+    logging.getLogger(noisy_logger_name).setLevel(logging.WARNING)
 
 app = FastAPI(title='Voice Evaluation Framework')
 
