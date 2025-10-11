@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket, Request, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
+from fastapi.staticfiles import StaticFiles
 import base64
 import json
 import logging
@@ -13,6 +14,8 @@ from src.config import Settings
 from src.services.twilio_client import make_outbound_call
 import sys
 import os
+import asyncio
+import requests
 
 # Configure logging (suppress debug output in server logs)
 logging.basicConfig(
@@ -36,6 +39,13 @@ for noisy_logger_name in [
     logging.getLogger(noisy_logger_name).setLevel(logging.WARNING)
 
 app = FastAPI(title='Voice Evaluation Framework')
+
+# Ensure static audio directory exists and expose it at /audio
+try:
+    os.makedirs('audio', exist_ok=True)
+except Exception:
+    pass
+app.mount('/audio', StaticFiles(directory='audio'), name='audio')
 
 # Load settings from hardcoded test.config.json
 config_file = "test.config.json"
@@ -95,7 +105,10 @@ async def twiml_voice(request: Request, cfg: str = Query(...)):
         
         twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" timeout="15" speechTimeout="auto" action="/twiml/gather" method="POST">
+  <Start>
+    <Record recordingStatusCallback="{settings.PUBLIC_BASE_URL}/webhook/call-status" />
+  </Start>
+  <Gather input="speech" language="en-US" timeout="5" speechTimeout="1" actionOnEmptyResult="true" enhanced="true" bargeIn="true" action="/twiml/gather" method="POST">
   </Gather>
   <Say voice="Polly.Joanna-Neural" language="en-US">
 I didn't hear anything. Let me try calling back later. Goodbye!
@@ -170,7 +183,8 @@ async def twiml_gather(request: Request):
             # End the call with an error message
             twiml_error = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna-Neural" language="en-US">I'm sorry, I'm experiencing technical difficulties. Please try calling back later. Goodbye!</Say>
+  <Say voice="Polly.Joanna-Neural" language="en-US">I'm sorry, I'm experiencing technical difficulties. Goodbye!</Say>
+  <Hangup/>
 </Response>"""
             logger.error(f"Call {call_sid} failed due to OpenAI error, ending call")
             return Response(content=twiml_error, media_type="application/xml")
@@ -184,15 +198,30 @@ async def twiml_gather(request: Request):
         # Escape XML special characters in customer response
         import html
         escaped_response = html.escape(customer_response)
-        
-        twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+
+        # Debounce before speaking to reduce overlap when agent continues talking
+        try:
+            await asyncio.sleep(max(0, settings.SILENCE_WAIT_DURATION) / 1000.0)
+        except Exception:
+            pass
+
+        # End the call after max turns; otherwise continue gathering
+        if conversation.turn_count >= settings.OPENAI_MAX_TURNS:
+            twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say voice="Polly.Joanna-Neural" language="en-US">{escaped_response}</Say>
-  <Gather input="speech" timeout="10" speechTimeout="auto" action="/twiml/gather" method="POST">
-  </Gather>
-  <Say voice="Polly.Joanna-Neural" language="en-US">Thank you for your time. Have a great day!</Say>
+  <Say voice="Polly.Joanna-Neural" language="en-US">Thank you for your time. Goodbye!</Say>
+  <Hangup/>
 </Response>""".strip()
-        
+        else:
+            twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="speech" language="en-US" timeout="5" speechTimeout="1" actionOnEmptyResult="true" enhanced="true" bargeIn="true" action="/twiml/gather" method="POST">
+    <Say voice="Polly.Joanna-Neural" language="en-US">{escaped_response}</Say>
+    <Play>{settings.PUBLIC_BASE_URL}/audio/click_beacon.wav</Play>
+  </Gather>
+</Response>""".strip()
+        logger.info(f"Public Base URL: {settings.PUBLIC_BASE_URL}/audio/click_beacon.wav")
         logger.info(f"TwiML Response: {twiml_response}")
         return Response(content=twiml_response, media_type="application/xml")
         
@@ -200,7 +229,7 @@ async def twiml_gather(request: Request):
         logger.exception("Error in twiml_gather")
         twiml_error = """<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna-Neural" language="en-US">Sorry, there was an error processing your response. Please try calling back later.</Say>
+  <Say voice="Polly.Joanna-Neural" language="en-US">Sorry, there was an error processing your response. </Say>
 </Response>"""
         return Response(content=twiml_error, media_type="application/xml")
 
@@ -295,6 +324,26 @@ async def call_status_webhook(request: Request):
         logger.info(f"Call SID: {call_sid}")
         logger.info(f"Call Status: {call_status}")
         logger.info(f"Call Duration: {call_duration}")
+
+        # Handle Recording Status Callback (download recording when available)
+        recording_sid = form_data.get('RecordingSid')
+        recording_url = form_data.get('RecordingUrl')
+        recording_status = form_data.get('RecordingStatus')
+        if recording_sid and recording_url and recording_status in ['completed', 'available']:
+            try:
+                # Twilio requires auth to download recording; append .mp3 to URL
+                mp3_url = f"{recording_url}.mp3"
+                auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+                resp = requests.get(mp3_url, auth=auth, timeout=30)
+                resp.raise_for_status()
+                recordings_dir = os.path.join('logs', 'recordings')
+                os.makedirs(recordings_dir, exist_ok=True)
+                out_path = os.path.join(recordings_dir, f"{call_sid}-{recording_sid}.mp3")
+                with open(out_path, 'wb') as f:
+                    f.write(resp.content)
+                logger.info(f"Saved recording to {out_path}")
+            except Exception as rec_err:
+                logger.error(f"Failed to download recording {recording_sid} for {call_sid}: {rec_err}")
         
         # Log call end if status indicates call ended
         if call_status in ['completed', 'failed', 'busy', 'no-answer']:
@@ -396,6 +445,22 @@ async def twilio_error(request: Request):
         logger.error(f"Error handling Twilio error event: {e}")
         logger.exception("Full traceback:")
         return {"status": "error", "message": str(e)}
+
+@app.get('/recordings/{call_sid}')
+async def download_recordings(call_sid: str):
+    """Return list of local recording files for a given Call SID."""
+    try:
+        recordings_dir = os.path.join('logs', 'recordings')
+        if not os.path.isdir(recordings_dir):
+            return {"recordings": []}
+        files = [
+            f for f in os.listdir(recordings_dir)
+            if f.startswith(call_sid + '-') and f.endswith('.mp3')
+        ]
+        return {"recordings": files}
+    except Exception as e:
+        logger.error(f"Error listing recordings: {e}")
+        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8080)
