@@ -4,6 +4,8 @@ Call runner for the Voice Evaluation Framework.
 Usage: python eval.py coffee
 """
 import requests
+import subprocess
+from pathlib import Path
 import json
 import time
 import sys
@@ -547,8 +549,62 @@ def main():
 
 
     print("\n")
-    analyze_conversation_log(log_file)    
-    print("\nCall evaluation completed!")
+
+    # Run audio analysis using analyze.py (beacon + prosody)
+    try:
+        recordings_dir = Path('logs') / 'recordings'
+        mp3_path = None
+        if recordings_dir.is_dir():
+            # Prefer a recording file matching this call_sid prefix
+            candidates = sorted(
+                [p for p in recordings_dir.glob(f"{call_sid}-*.mp3")],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )
+            if candidates:
+                mp3_path = candidates[0]
+        if not mp3_path:
+            print("No call recording found; skipping audio analysis.")
+        else:
+            # Choose a beacon template that exists locally
+            beacon_candidates = [
+                Path('audio') / 'click.wav',
+                Path('audio') / 'click_beacon.wav',
+                Path('audio') / 'unique_beacon.wav',
+                Path('audio') / 'short_quiet_beacon.wav',
+            ]
+            beacon = next((b for b in beacon_candidates if b.exists()), None)
+            if not beacon:
+                print("No local beacon WAV found in ./audio; run analyze without beacon.")
+                cmd = [
+                    sys.executable,
+                    str(Path('analyze.py').resolve()),
+                    str(mp3_path.resolve()),
+                    "--prosody",
+                ]
+            else:
+                cmd = [
+                    sys.executable,
+                    str(Path('analyze.py').resolve()),
+                    str(mp3_path.resolve()),
+                    "--prosody",
+                    "--usebeacon",
+                    f"--beacon={str(beacon.resolve())}",
+                ]
+
+            print("=" * 80)
+            print("AUDIO ANALYSIS (analyze.py)")
+            print("=" * 80)
+            proc = subprocess.run(cmd, text=True, capture_output=True, cwd=str(Path('.').resolve()))
+            if proc.stdout:
+                print(proc.stdout)
+            if proc.stderr:
+                # Non-fatal: show errors to user
+                print(proc.stderr)
+    except Exception as e:
+        print(f"Audio analysis failed: {e}")
+
+    print("Call evaluation completed!")
 
 if __name__ == "__main__":
     main()

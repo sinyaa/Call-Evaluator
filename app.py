@@ -108,7 +108,7 @@ async def twiml_voice(request: Request, cfg: str = Query(...)):
   <Start>
     <Record recordingStatusCallback="{settings.PUBLIC_BASE_URL}/webhook/call-status" />
   </Start>
-  <Gather input="speech" language="en-US" timeout="5" speechTimeout="1" actionOnEmptyResult="true" enhanced="true" bargeIn="true" action="/twiml/gather" method="POST">
+  <Gather input="speech" language="en-US" timeout="15" speechTimeout="auto" actionOnEmptyResult="false" enhanced="true" bargeIn="false" action="/twiml/gather" method="POST">
   </Gather>
   <Say voice="Polly.Joanna-Neural" language="en-US">
 I didn't hear anything. Let me try calling back later. Goodbye!
@@ -209,14 +209,13 @@ async def twiml_gather(request: Request):
         if conversation.turn_count >= settings.OPENAI_MAX_TURNS:
             twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="Polly.Joanna-Neural" language="en-US">{escaped_response}</Say>
-  <Say voice="Polly.Joanna-Neural" language="en-US">Thank you for your time. Goodbye!</Say>
+  <Say voice="Polly.Joanna-Neural" language="en-US">I am sorry but this reaches the end of my test.Thank you for your time. Goodbye!</Say>
   <Hangup/>
 </Response>""".strip()
         else:
             twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" language="en-US" timeout="5" speechTimeout="1" actionOnEmptyResult="true" enhanced="true" bargeIn="true" action="/twiml/gather" method="POST">
+  <Gather input="speech" language="en-US" timeout="15" speechTimeout="auto" actionOnEmptyResult="false" enhanced="true" bargeIn="false" action="/twiml/gather" method="POST">
     <Say voice="Polly.Joanna-Neural" language="en-US">{escaped_response}</Say>
     <Play>{settings.PUBLIC_BASE_URL}/audio/click.wav</Play>
   </Gather>

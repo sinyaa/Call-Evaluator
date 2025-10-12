@@ -10,7 +10,6 @@ Optional beacon analysis:
   --usebeacon                    Enable beacon-based silence measurement
   --beacon=<path.wav>            Path to beacon WAV template
   --channel=<mix|left|right>     Choose which recorded channel to analyze (dual-channel recordings)
-  --asr                          Try to extract first word after each beacon (needs faster-whisper)
 
 Advanced beacon tuning:
   --beacon_mode=<simple|strict>  Detector mode (simple = NCC only; strict = NCC + cosine)
@@ -22,7 +21,7 @@ Advanced beacon tuning:
 
 Notes:
 - Requires: numpy, librosa, pydub (and ffmpeg), auditok, mutagen
-- Optional: faster-whisper (for --asr)
+ 
 """
 
 import sys, os, io, math, tempfile
@@ -472,78 +471,30 @@ def fmt_bps(v):
     try: return f"{float(v)/1000.0:.0f} kbps"
     except Exception: return str(v)
 
-_ASR_MODEL_CACHE = {}
-
-def _get_asr_model(name="small"):
-    """Cache faster-whisper models by name."""
-    if name in _ASR_MODEL_CACHE:
-        return _ASR_MODEL_CACHE[name]
+def fmt_min_sec_ms(v):
+    if v is None:
+        return "-"
     try:
-        from faster_whisper import WhisperModel  # type: ignore
-        model = WhisperModel(name, device="cpu", compute_type="int8")
-        _ASR_MODEL_CACHE[name] = model
-        print(f"    ASR: model loaded: {name}")
-        return model
+        fv = float(v)
+        total_ms = int(round(fv * 1000.0))
+        minutes = total_ms // 60000
+        rem_ms = total_ms % 60000
+        seconds = rem_ms // 1000
+        ms = rem_ms % 1000
+        # Normalize potential rounding to next second/minute
+        if ms == 1000:
+            seconds += 1
+            ms = 0
+        if seconds == 60:
+            minutes += 1
+            seconds = 0
+        return f"{minutes}:{seconds:02d}.{ms:03d}"
     except Exception:
-        print(f"    ASR: model not available: {name}")
-        return None
+        return str(v)
 
-def _first_word_after(wav_path,
-                      speech_start_time,
-                      lookahead_sec=6.0,     # was 5.0 → give ASR a bit more to chew on
-                      sr=16000,
-                      onset_pad=0.25,        # was 0.150 → start a hair later after the boundary
-                      language=None,         # None = auto-detect; set "en", "ru", etc. for better reliability
-                      asr_model="small",
-                      debug=False):
-    """
-    Return the first recognized word after speech_start_time.
-    Strategy:
-      1) Window = [onset_pad .. onset_pad + lookahead_sec]
-      2) Pass A: VAD-filtered decode
-      3) If empty, Pass B: no-VAD decode (helps when VAD misses soft first syllables)
-    """
-    model = _get_asr_model(asr_model)
-    if model is None:
-        if debug: print("    ASR: model not available")
-        return None
+ 
 
-    # Load window
-    y, _ = _load_mono_wav(wav_path, sr=sr)
-    s = max(0, int((speech_start_time + onset_pad) * sr))
-    e = min(len(y), int((speech_start_time + onset_pad + lookahead_sec) * sr))
-    if e <= s + 256:
-        return None
 
-    # Light normalization helps ASR on quiet snippets
-    w = y[s:e].astype(np.float32)
-    m = np.max(np.abs(w)) or 1.0
-    w = 0.9 * (w / m)
-
-    def _decode(vad=True):
-        segs, _ = model.transcribe(
-            w,
-            language=language,               # None => auto
-            vad_filter=vad,
-            vad_parameters={"min_silence_duration_ms": 120} if vad else None,
-            beam_size=1, best_of=1
-        )
-        txt = " ".join([getattr(sg, "text", "").strip() for sg in segs if getattr(sg, "text", "")]).strip()
-        return txt
-
-    # Pass A: with VAD
-    text = _decode(vad=True)
-    if debug: print(f"    ASR A (VAD) -> {text!r}")
-    if not text:
-        # Pass B: without VAD (catch soft/short first words)
-        text = _decode(vad=False)
-        if debug: print(f"    ASR B (no VAD) -> {text!r}")
-    if not text:
-        return None
-
-    import re
-    toks = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ0-9'’\-]+", text)
-    return toks[0] if toks else None
 
 def silence_after_beacon(mp3_path,
                          beacon_wav_path,
@@ -552,12 +503,10 @@ def silence_after_beacon(mp3_path,
                          vad_min_dur=0.2, vad_max_dur=30.0, vad_max_silence=0.35, vad_energy_threshold=55,
                          # Detector knobs (ZNCC in [-1,1])
                          cc_threshold=0.60, refractory_sec=None, cos_threshold=0.85,
-                         mode="strict", debug=False, beacon_channel="mix",
-                         # ASR
-                         use_asr=True, asr_lookahead=5.0):
+                         mode="strict", debug=False, beacon_channel="mix"):
     """
-    For each beacon, measure silence until next speech start, and (optionally) first word.
-    Returns: {"beacons":[{"beacon_start_sec","beacon_end_sec","next_speech_start_sec","silence_ms","first_word"}]}
+    For each beacon, measure silence until the next speech start.
+    Returns: {"beacons":[{"beacon_start_sec","beacon_end_sec","next_speech_start_sec","silence_ms"}]}
     """
     tmp_call_wav = _export_wav_from_mp3(mp3_path, sr=sr, channel=beacon_channel)
     try:
@@ -592,17 +541,14 @@ def silence_after_beacon(mp3_path,
                 results.append({"beacon_start_sec": round(float(b_st),3),
                                 "beacon_end_sec": round(float(b_en),3),
                                 "next_speech_start_sec": None,
-                                "silence_ms": None,
-                                "first_word": None})
+                                "silence_ms": None})
                 continue
 
             gap_ms = max(0.0, (next_speech - b_en) * 1000.0)
-            first_word = _first_word_after(tmp_call_wav, next_speech, lookahead_sec=asr_lookahead, sr=sr)
             results.append({"beacon_start_sec": round(float(b_st),3),
                             "beacon_end_sec": round(float(b_en),3),
                             "next_speech_start_sec": round(float(next_speech),3),
-                            "silence_ms": round(float(gap_ms),1),
-                            "first_word": first_word})
+                            "silence_ms": round(float(gap_ms),1)})
         return {"beacons": results}
     finally:
         try: os.remove(tmp_call_wav)
@@ -626,7 +572,6 @@ def main():
     # Beacon flags
     useBeacon = False
     beaconFilePath = None
-    use_asr = True
 
     beacon_channel = "mix"
     beacon_mode = "strict"
@@ -756,7 +701,6 @@ def main():
                         mp3_path,
                         beaconFilePath,
                         sr=16000,
-                        use_asr=use_asr,
                         cc_threshold=cc_threshold,
                         refractory_sec=(None if refractory_sec < 0 else refractory_sec),
                         cos_threshold=cos_threshold,
@@ -769,18 +713,32 @@ def main():
                         print("  No beacons detected (consider lowering cc_threshold or verify the WAV).")
                     else:
                         for i, item in enumerate(items, 1):
-                            st = item["beacon_start_sec"]; en = item["beacon_end_sec"]
-                            ns = item["next_speech_start_sec"]; gap = item["silence_ms"]
-                            fw = item["first_word"]
-                            fw_txt = fw if (fw and isinstance(fw, str) and fw.strip()) else "—"
-                            print(f"  #{i} beacon {st:.3f}→{en:.3f} | next speech: {fmt_sec(ns)} | silence: {fmt_ms(gap)} | first word: {fw_txt}")
+                            st = item["beacon_start_sec"]; ns = item["next_speech_start_sec"]; gap = item["silence_ms"]
+                            print(f"  #{i} {fmt_min_sec_ms(st)} | next: {fmt_min_sec_ms(ns)} | silence: {fmt_ms(gap)}")
 
                         silences = [x["silence_ms"] for x in items if x.get("silence_ms") is not None]
                         if silences:
                             arr = np.array(silences, dtype=float)
-                            avg = arr.mean(); p95 = np.percentile(arr, 95)
-                            print(f"  Summary: {avg:.1f} ms (avg), {arr.min():.1f}–{arr.max():.1f} ms, n={len(arr)}")
-                            print(f"           P95: {p95:.1f} ms")
+                            avg = float(arr.mean())
+                            p95 = float(np.percentile(arr, 95))
+                            min_v = float(arr.min())
+                            max_v = float(arr.max())
+
+                            def _lat_color(v: float):
+                                # Color thresholds: faster is greener
+                                if v <= 800.0: return GREEN
+                                if v <= 1100.0: return CYAN
+                                if v <= 1500.0: return YELLOW
+                                return RED
+
+                            c_avg = _lat_color(avg)
+                            c_min = _lat_color(min_v)
+                            c_max = _lat_color(max_v)
+                            c_p95 = _lat_color(p95)
+
+                            print(f"  {BOLD}Summary{RESET}")
+                            print(f"    Avg: {c_avg}{avg:.1f} ms{RESET}    Min: {c_min}{min_v:.1f} ms{RESET}    Max: {c_max}{max_v:.1f} ms{RESET}")
+                            print(f"    P95: {c_p95}{p95:.1f} ms{RESET}    Count: {len(arr)}")
                 except Exception as e:
                     print(f"{YELLOW}  Note:{RESET} Beacon analysis failed: {e}")
 
