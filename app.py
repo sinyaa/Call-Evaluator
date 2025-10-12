@@ -218,10 +218,9 @@ async def twiml_gather(request: Request):
 <Response>
   <Gather input="speech" language="en-US" timeout="5" speechTimeout="1" actionOnEmptyResult="true" enhanced="true" bargeIn="true" action="/twiml/gather" method="POST">
     <Say voice="Polly.Joanna-Neural" language="en-US">{escaped_response}</Say>
-    <Play>{settings.PUBLIC_BASE_URL}/audio/click_beacon.wav</Play>
+    <Play>{settings.PUBLIC_BASE_URL}/audio/click.wav</Play>
   </Gather>
 </Response>""".strip()
-        logger.info(f"Public Base URL: {settings.PUBLIC_BASE_URL}/audio/click_beacon.wav")
         logger.info(f"TwiML Response: {twiml_response}")
         return Response(content=twiml_response, media_type="application/xml")
         
